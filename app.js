@@ -2,9 +2,11 @@ import { EXERCISES, EXERCISES_BY_ID, MUSCLES, MUSCLE_LABELS } from './exercises.
 import {
   GOALS, RECOVERY_HOURS, buildRoutine, defaultRoutineName, estimateMinutes, muscleRecovery,
   recommendToday, routineMuscles, lastPerformance, suggestNext, exerciseStats, newRecords,
-  workoutVolume, weekStats,
+  workoutVolume, weekStats, avgEffort, heartSummary, HR_ZONES,
 } from './recommend.js';
-import { load, save, clear, newId, parseBackup, MAX_IMPORT_BYTES } from './store.js';
+import {
+  load, save, clear, newId, parseBackup, MAX_IMPORT_BYTES, parseHeartRate, compactHeartRate,
+} from './store.js';
 
 // Refuse to run inside a frame on another site (clickjacking).
 if (window.top !== window.self) throw new Error('Lift cannot be embedded.');
@@ -110,12 +112,14 @@ const ICONS = {
   upload: ['M12 3v12M8 11l4 4 4-4', 'M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7'],
   stack: ['M12 3 3 8l9 5 9-5z', 'm3 13 9 5 9-5'],
   clock: ['M12 7v5l3 2', 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'],
+  heart: ['M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.1a4.3 4.3 0 0 1 7.5 2.7C19.5 15.4 12 20 12 20z'],
+  paste: ['M9 3h6v3H9z', 'M9 4.5H6v16.5h12V4.5h-3'],
 };
 const FILLED = new Set(['play', 'bolt']);
 
 function icon(name, cls = '') {
   return svg('svg', {
-    viewBox: '0 0 24 24', class: 'icon ' + cls, 'aria-hidden': 'true',
+    viewBox: '0 0 24 24', class: `icon i-${name} ${cls}`, 'aria-hidden': 'true',
     fill: FILLED.has(name) ? 'currentColor' : 'none',
     stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
   }, ...ICONS[name].map(d => svg('path', { d })));
@@ -125,8 +129,9 @@ function toast(msg) {
   document.querySelector('.toast')?.remove();
   const t = h('div', { class: 'toast', role: 'status' }, msg);
   document.body.append(t);
-  setTimeout(() => t.classList.add('out'), 2200);
-  setTimeout(() => t.remove(), 2600);
+  const ms = Math.max(2200, msg.length * 55);
+  setTimeout(() => t.classList.add('out'), ms);
+  setTimeout(() => t.remove(), ms + 400);
 }
 
 /* ---------- navigation ---------- */
@@ -143,6 +148,7 @@ const VIEWS = {
   today: viewToday, routines: viewRoutines, history: viewHistory, settings: viewSettings,
   builder: viewBuilder, editor: viewEditor, picker: viewPicker, workout: viewWorkout,
   summary: viewSummary, workoutDetail: viewWorkoutDetail, exerciseDetail: viewExerciseDetail,
+  hrSetup: viewHeartRateSetup,
 };
 
 function render(resetScroll = false) {
@@ -211,6 +217,7 @@ function startWorkout(routine) {
       : [],
   };
   rest = null;
+  effortFor = null;
   persist();
   go('workout');
 }
@@ -475,6 +482,7 @@ function viewPicker(p) {
 /* ---------- Active workout ---------- */
 
 let rest = null; // { end, total }
+let effortFor = null; // { i, j }: the set whose "How hard?" picker is open
 
 function startRest(seconds) {
   rest = seconds > 0 ? { end: Date.now() + seconds * 1000, total: seconds } : null;
@@ -485,6 +493,8 @@ function suggestionText(s, info) {
   if (s.kind === 'new') return ['First time', `Pick a weight you can lift for ${s.r}+ reps`];
   if (s.kind === 'bw-up') return ['Level up', `You hit every rep — go for ${s.r} reps or add weight`];
   if (s.kind === 'up') return ['Add weight', `You hit every rep last time — try ${fmtW(s.w)} ${u} × ${s.r}`];
+  if (s.kind === 'easy') return ['Add weight', `That felt easy last time — try ${fmtW(s.w)} ${u} × ${s.r}`];
+  if (s.kind === 'hold') return ['Repeat', `You hit every rep, but at max effort — stay at ${fmtW(s.w)} ${u} × ${s.r} once more`];
   if (info.equipment === 'bodyweight' || !s.w) return ['Target', `Aim for ${s.r} reps per set`];
   return ['Target', `Stay at ${fmtW(s.w)} ${u} and aim for ${s.r} reps`];
 }
@@ -510,6 +520,7 @@ function viewWorkout() {
     state.workouts.push(finished);
     state.active = null;
     rest = null;
+    effortFor = null;
     persist();
     nav = { tab: 'today', stack: [{ view: 'summary', id: finished.id, prs }] };
     render(true);
@@ -552,14 +563,26 @@ function exerciseCard(we, i, w, u) {
   const [tag, text] = suggestionText(sugg, info);
   const bodyweight = info.equipment === 'bodyweight';
 
+  // Weight and reps carry over from the last earlier set that has them.
+  const carried = (j, key) => we.sets.slice(0, j).reverse().find(x => x[key] != null)?.[key];
+
   const toggleSet = (s, j) => {
-    if (s.done) { s.done = false; persist(); render(); return; }
-    const prev = we.sets[j - 1];
-    if (s.w == null) s.w = prev?.w ?? sugg.w ?? (bodyweight ? 0 : null);
-    if (s.r == null) s.r = prev?.r ?? sugg.r;
+    if (s.done) {
+      s.done = false;
+      delete s.t;
+      delete s.rpe;
+      if (effortFor?.i === i && effortFor?.j === j) effortFor = null;
+      persist();
+      render();
+      return;
+    }
+    if (s.w == null) s.w = carried(j, 'w') ?? sugg.w ?? (bodyweight ? 0 : null);
+    if (s.r == null) s.r = carried(j, 'r') ?? sugg.r;
     if (s.w == null) return toast('Enter the weight first.');
     if (!s.r) return toast('Enter your reps first.');
     s.done = true;
+    s.t = Date.now();
+    effortFor = { i, j };
     startRest(we.rest);
     persist();
     render();
@@ -573,8 +596,8 @@ function exerciseCard(we, i, w, u) {
         class: 'icon-btn small', 'aria-label': `Remove ${info.name}`,
         onclick: () => { if (confirm(`Remove ${info.name} from this workout?`)) { w.exercises.splice(i, 1); persist(); render(); } },
       }, icon('x'))),
-    h('div', { class: 'suggestion ' + sugg.kind },
-      icon(sugg.kind === 'up' || sugg.kind === 'bw-up' ? 'up' : 'sparkle'),
+    h('div', { class: 'suggestion ' + (sugg.kind === 'easy' ? 'up' : sugg.kind) },
+      icon(['up', 'easy', 'bw-up'].includes(sugg.kind) ? 'up' : 'sparkle'),
       h('span', null, h('strong', null, tag + ' '), text)),
     h('div', { class: 'sets' },
       h('div', { class: 'set-row head' },
@@ -582,9 +605,12 @@ function exerciseCard(we, i, w, u) {
         h('span', null, bodyweight ? `+${u}` : u), h('span', null, 'Reps'), h('span', null, '')),
       we.sets.map((s, j) => {
         const p = last?.sets[j];
-        const placeholderW = we.sets[j - 1]?.w ?? sugg.w;
-        return h('div', { class: 'set-row' + (s.done ? ' done' : '') },
-          h('span', { class: 'set-num' }, j + 1),
+        const placeholderW = carried(j, 'w') ?? sugg.w;
+        const row = h('div', { class: 'set-row' + (s.done ? ' done' : '') },
+          s.done
+            ? h('button', { class: 'set-num', 'aria-label': `Rate effort for set ${j + 1}`, onclick: () => { effortFor = { i, j }; render(); } },
+              j + 1, s.rpe != null ? h('small', null, '@' + s.rpe) : null)
+            : h('span', { class: 'set-num' }, j + 1),
           h('span', { class: 'prev' }, p ? `${p.w ? fmtW(p.w) : 'BW'} × ${p.r}` : '—'),
           h('input', {
             class: 'num', inputMode: 'decimal', value: fmtW(s.w), placeholder: placeholderW != null ? fmtW(placeholderW) || '0' : (bodyweight ? '0' : '–'),
@@ -592,11 +618,12 @@ function exerciseCard(we, i, w, u) {
             oninput: e => { const v = parseNum(e.target.value); s.w = v == null ? null : fromDisplay(v); persist(); },
           }),
           h('input', {
-            class: 'num', inputMode: 'numeric', value: s.r == null ? '' : String(s.r), placeholder: String(we.sets[j - 1]?.r ?? sugg.r),
+            class: 'num', inputMode: 'numeric', value: s.r == null ? '' : String(s.r), placeholder: String(carried(j, 'r') ?? sugg.r),
             'aria-label': `Set ${j + 1} reps`, enterKeyHint: 'done',
             oninput: e => { const v = parseNum(e.target.value); s.r = v == null ? null : clampInt(v, 0, 1000); persist(); },
           }),
           h('button', { class: 'check', 'aria-label': `Complete set ${j + 1}`, 'aria-pressed': String(s.done), onclick: () => toggleSet(s, j) }, icon('check')));
+        return s.done && effortFor?.i === i && effortFor?.j === j ? [row, effortPicker(s)] : row;
       })),
     h('div', { class: 'exercise-foot' },
       h('button', {
@@ -604,6 +631,14 @@ function exerciseCard(we, i, w, u) {
         onclick: () => { const p = we.sets[we.sets.length - 1]; we.sets.push({ w: p?.w ?? null, r: null, done: false }); persist(); render(); },
       }, icon('plus'), 'Add set'),
       we.sets.length > 1 ? h('button', { class: 'btn text small muted', onclick: () => { we.sets.pop(); persist(); render(); } }, 'Remove set') : null));
+}
+
+function effortPicker(s) {
+  const pick = v => { s.rpe = s.rpe === v ? undefined : v; if (s.rpe === undefined) delete s.rpe; effortFor = null; persist(); render(); };
+  return h('div', { class: 'effort-row' },
+    h('span', { class: 'effort-label' }, 'How hard?', h('small', null, '10 = max')),
+    [6, 7, 8, 9, 10].map(v => h('button', { class: s.rpe === v ? 'on' : '', 'aria-pressed': String(s.rpe === v), onclick: () => pick(v) }, v)),
+    h('button', { class: 'effort-close', 'aria-label': 'Close', onclick: () => { effortFor = null; render(); } }, icon('x')));
 }
 
 function restBar() {
@@ -650,14 +685,21 @@ function viewSummary(p) {
     h('div', { class: 'stats' },
       stat('clock', fmtDuration(w.end - w.start), 'Duration'),
       stat('dumbbell', sets, 'Sets'),
-      stat('stack', fmtVolume(workoutVolume(w)), `${unit()} volume`)),
+      stat('stack', fmtVolume(workoutVolume(w)), `${unit()} volume`),
+      effortStat(w)),
     p.prs.length ? section('New personal records',
       h('div', { class: 'card rows' }, p.prs.map(pr =>
         h('div', { class: 'row' }, icon('trophy', 'gold'),
           h('span', { class: 'grow' }, h('strong', null, EXERCISES_BY_ID[pr.exId].name),
             h('small', null, pr.kind === 'weight' ? `Heaviest weight: ${fmtW(pr.value)} ${unit()}` : `Best estimated 1RM: ${fmtW(pr.value)} ${unit()}`)))))) : null,
+    heartSection(w),
     section(null, h('button', { class: 'btn primary block', onclick: () => setTab('today') }, 'Done')),
   ];
+}
+
+function effortStat(w) {
+  const e = avgEffort(w);
+  return e == null ? null : stat('bolt', (Math.round(e * 10) / 10).toString(), 'Avg effort (of 10)');
 }
 
 /* ---------- History ---------- */
@@ -721,11 +763,14 @@ function viewWorkoutDetail(p) {
     h('div', { class: 'stats' },
       stat('clock', fmtDuration((w.end || w.start) - w.start), 'Duration'),
       stat('dumbbell', w.exercises.reduce((t, e) => t + e.sets.length, 0), 'Sets'),
-      stat('stack', fmtVolume(workoutVolume(w)), `${unit()} volume`)),
+      stat('stack', fmtVolume(workoutVolume(w)), `${unit()} volume`),
+      effortStat(w)),
+    heartSection(w),
     w.exercises.map(e => section(EXERCISES_BY_ID[e.exId].name,
       h('div', { class: 'card rows' }, e.sets.map((s, i) =>
         h('div', { class: 'row compact' }, h('span', { class: 'set-num' }, i + 1),
-          h('span', { class: 'grow' }, s.w ? `${fmtW(s.w)} ${unit()} × ${s.r}` : `${s.r} reps`)))))),
+          h('span', { class: 'grow' }, s.w ? `${fmtW(s.w)} ${unit()} × ${s.r}` : `${s.r} reps`),
+          s.rpe != null ? h('small', null, `effort ${s.rpe}`) : null))))),
     h('button', { class: 'btn text danger block', onclick: del }, icon('trash'), 'Delete workout'),
   ];
 }
@@ -797,6 +842,17 @@ function viewSettings() {
       h('div', { class: 'card privacy' }, icon('share', 'accent'),
         h('div', null, h('strong', null, 'Add Lift to your Home Screen'),
           h('p', { class: 'muted' }, 'In Safari, tap the Share button, then “Add to Home Screen”. It opens full-screen and iOS keeps your data safe.')))),
+    section('Heart rate',
+      h('div', { class: 'card rows' },
+        h('label', { class: 'row' }, icon('heart'),
+          h('span', { class: 'grow' }, h('strong', null, 'Max heart rate'), h('small', null, 'Roughly 220 minus your age. Used for heart-rate zones.')),
+          h('input', {
+            class: 'num small wide', inputMode: 'numeric', value: String(state.settings.maxHR), 'aria-label': 'Max heart rate',
+            onchange: e => { const v = parseNum(e.target.value); if (v != null) state.settings.maxHR = clampInt(v, 120, 230); persist(); render(); },
+          })),
+        h('button', { class: 'row', onclick: () => go('hrSetup') }, icon('paste', 'accent'),
+          h('span', { class: 'grow' }, h('strong', null, 'Apple Health shortcut'), h('small', null, 'One-time setup to import heart rate')),
+          icon('chevron', 'muted')))),
     section('Backup',
       h('div', { class: 'card rows' },
         h('button', { class: 'row', onclick: exportBackup }, icon('share', 'accent'),
@@ -857,3 +913,176 @@ function eraseAll() {
 render(true);
 navigator.storage?.persist?.().catch(() => {});
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+/* ---------- Heart rate ---------- */
+
+const SHORTCUT_NAME = 'Lift Heart Rate';
+const SHORTCUT_URL = 'shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT_NAME);
+
+async function pasteHeartRate(w) {
+  let text;
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    return toast('Lift couldn’t read the clipboard. Tap “Paste” when your iPhone asks.');
+  }
+  let samples;
+  try { samples = parseHeartRate(text); } catch (err) { return toast(err.message); }
+  const hr = compactHeartRate(samples, w.start, w.end || Date.now());
+  if (!hr) return toast('No heart rate found during this workout. Did you start a workout on your Watch?');
+  w.hr = hr;
+  persist();
+  navigator.clipboard.writeText('').catch(() => {});
+  toast('Heart rate added');
+  render();
+}
+
+function heartActions(w, has) {
+  return h('div', { class: 'hr-actions' },
+    h('a', { class: 'btn secondary small', href: SHORTCUT_URL }, icon('heart'), has ? 'Get again' : 'Get heart rate'),
+    h('button', { class: 'btn primary small', onclick: () => pasteHeartRate(w) }, icon('paste'), 'Paste heart rate'));
+}
+
+function heartSection(w) {
+  const hs = heartSummary(w, state.settings.maxHR);
+  if (!hs) {
+    return section('Heart rate',
+      h('div', { class: 'card hr-empty' },
+        h('p', { class: 'muted' }, 'Wore your Apple Watch? Tap “Get heart rate” to run the Lift shortcut, then come back and paste the result.'),
+        heartActions(w, false),
+        h('button', { class: 'btn text small', onclick: () => go('hrSetup') }, 'How to set up the shortcut')));
+  }
+  const timedSets = w.exercises.some(e => e.sets.some(s => s.t != null));
+  return section('Heart rate',
+    h('div', { class: 'stats' },
+      stat('heart', hs.avg, 'Avg bpm'),
+      stat('heart', hs.max, 'Max bpm'),
+      hs.recoveries.length
+        ? stat('arrowDown', Math.round(hs.recoveries.reduce((t, r) => t + r.drop, 0) / hs.recoveries.length), 'bpm recovery / min')
+        : null),
+    h('div', { class: 'card chart-card heart' }, heartChart(w)),
+    fatigueCard(hs),
+    zonesCard(hs),
+    hs.exercises.length ? h('div', { class: 'card rows hr-exercises' }, hs.exercises.map(e =>
+      h('div', { class: 'row' },
+        h('span', { class: 'index' }, e.index + 1),
+        h('span', { class: 'grow' }, h('strong', null, EXERCISES_BY_ID[w.exercises[e.index].exId].name),
+          h('small', null, `avg ${e.avg} · peak ${e.peak} bpm`)),
+        e.recovery != null ? h('span', { class: 'recovery-drop' }, `−${e.recovery}`, h('small', null, 'bpm/min')) : null)))
+      : timedSets ? null : h('p', { class: 'muted small hr-note' }, 'A per-exercise breakdown is shown for workouts logged after the heart-rate update.'),
+    heartActions(w, true));
+}
+
+function fatigueCard(hs) {
+  const f = hs.fatigue;
+  if (!f) return null;
+  let title, text;
+  if (f.changePct >= 25) {
+    title = `Recovery slowed ${f.changePct}%`;
+    text = `Early on your heart rate dropped ${f.first} bpm in the first minute of rest, by the end only ${f.last}. You were getting tired — normal late in a session, but if this is much worse than usual, rest longer between sets or call it a day.`;
+  } else if (f.changePct >= 10) {
+    title = `Recovery slowed ${f.changePct}%`;
+    text = `Your heart rate drop after sets went from ${f.first} to ${f.last} bpm in the first minute of rest — moderate fatigue.`;
+  } else {
+    title = 'Recovery held up';
+    text = `Your heart rate still dropped ${f.last} bpm in the first minute of rest at the end (${f.first} at the start). You had more in the tank.`;
+  }
+  return h('div', { class: 'card insight' + (f.changePct >= 25 ? ' warn' : '') },
+    h('strong', null, title), h('p', { class: 'muted' }, text));
+}
+
+function zonesCard(hs) {
+  const total = hs.zones.reduce((a, b) => a + b, 0) || 1;
+  const max = state.settings.maxHR;
+  const bar = h('div', { class: 'zone-bar' }, hs.zones.map((sec, z) => {
+    const seg = h('span', { class: `z${z + 1}` });
+    seg.style.width = `${(sec / total) * 100}%`;
+    return seg;
+  }));
+  return h('div', { class: 'card zones' }, bar,
+    HR_ZONES.map((zone, z) => {
+      const lo = Math.round(zone.from * max);
+      const hi = HR_ZONES[z + 1] ? Math.round(HR_ZONES[z + 1].from * max) - 1 : null;
+      return h('div', { class: 'zone-row' },
+        h('span', { class: `zone-dot z${z + 1}` }),
+        h('span', { class: 'grow' }, h('strong', null, zone.name),
+          h('small', null, z === 0 ? `under ${HR_ZONES[1].from * max | 0} bpm` : hi ? `${lo}–${hi} bpm` : `${lo}+ bpm`)),
+        h('span', { class: 'mono' }, `${Math.round(hs.zones[z] / 60)} min`));
+    }));
+}
+
+function heartChart(w) {
+  const hr = w.hr;
+  const W = 320, H = 150, P = 6, TOP = 20;
+  const end = w.end || hr.t0 + hr.bpm.length * hr.step * 1000;
+  const span = end - w.start;
+  const pts = hr.bpm.map((v, i) => ({ t: hr.t0 + (i + 0.5) * hr.step * 1000, v }))
+    .filter(p => p.t >= w.start && p.t <= end);
+  const vals = pts.filter(p => p.v != null).map(p => p.v);
+  if (!vals.length) return h('p', { class: 'muted center' }, 'No heart rate recorded during this workout.');
+  const min = Math.min(...vals) - 5, max = Math.max(...vals) + 5;
+  const x = t => P + ((t - w.start) / span) * (W - 2 * P);
+  const y = v => TOP + (1 - (v - min) / (max - min)) * (H - TOP - P);
+
+  let d = '';
+  let pen = false;
+  for (const p of pts) {
+    if (p.v == null) { pen = false; continue; }
+    d += `${pen ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`;
+    pen = true;
+  }
+
+  // Shaded band + number for each exercise, from the previous exercise's last set to its own last set.
+  const segs = w.exercises
+    .map((e, index) => ({ index, ts: e.sets.filter(s => s.t != null).map(s => s.t) }))
+    .filter(e => e.ts.length)
+    .map(e => ({ index: e.index, last: Math.max(...e.ts), first: Math.min(...e.ts) }))
+    .sort((a, b) => a.first - b.first);
+  const bands = segs.map((s, k) => {
+    const from = k ? segs[k - 1].last : w.start;
+    const x0 = x(from), x1 = x(s.last);
+    return svg('g', null,
+      svg('rect', { x: x0.toFixed(1), y: '0', width: Math.max(0, x1 - x0).toFixed(1), height: String(H), class: k % 2 ? 'band odd' : 'band' }),
+      svg('text', { x: ((x0 + x1) / 2).toFixed(1), y: '13', 'text-anchor': 'middle', class: 'band-label' }, String(s.index + 1)));
+  });
+
+  return h('div', { class: 'chart' },
+    h('div', { class: 'chart-labels' }, h('strong', null, 'Heart rate'), h('small', null, `${Math.round(min + 5)}–${Math.round(max - 5)} bpm`)),
+    svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'chart-svg', role: 'img', 'aria-label': 'Heart rate during the workout' },
+      ...bands,
+      svg('path', { d, fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' })),
+    h('div', { class: 'chart-axis' }, h('small', null, '0:00'), h('small', null, fmtClock(span / 1000))));
+}
+
+function viewHeartRateSetup() {
+  const step = (n, title, ...body) => h('li', { class: 'step' }, h('span', { class: 'index' }, n), h('div', { class: 'grow' }, h('strong', null, title), body));
+  return [
+    navBar('Heart Rate Setup'),
+    h('div', { class: 'detail-head' },
+      h('h1', null, 'Import heart rate'),
+      h('p', { class: 'muted intro' }, 'A one-time shortcut copies your Apple Watch heart rate from Health, and Lift reads it from the clipboard. Nothing is uploaded anywhere.')),
+    section('Every workout',
+      h('ol', { class: 'card steps' },
+        step(1, 'Start a workout on your Watch', h('p', { class: 'muted' }, 'Choose “Traditional Strength Training” when you start in Lift. Without it the Watch only measures heart rate every few minutes.')),
+        step(2, 'Finish both', h('p', { class: 'muted' }, 'End the workout on your Watch and in Lift.')),
+        step(3, 'Get heart rate', h('p', { class: 'muted' }, 'On the summary (or any past workout) tap “Get heart rate”. Run it within 12 hours of the workout.')),
+        step(4, 'Paste', h('p', { class: 'muted' }, 'Come back to Lift, tap “Paste heart rate” and allow the paste. Lift then clears your clipboard.')))),
+    section('Create the shortcut (once)',
+      h('ol', { class: 'card steps' },
+        step(1, 'Open Shortcuts and tap +', h('p', { class: 'muted' }, 'Name it exactly “Lift Heart Rate”.')),
+        step(2, 'Add “Find Health Samples”', h('p', { class: 'muted' }, 'Type: Heart Rate. Add filter: Start Date is in the last 12 hours. Sort by: Start Date, Oldest First. Limit: off.')),
+        step(3, 'Add “Get Details of Health Sample”', h('p', { class: 'muted' }, 'Detail: Value.')),
+        step(4, 'Add “Combine Text”', h('p', { class: 'muted' }, 'Combine with: New Lines.')),
+        step(5, 'Add “Set Variable”', h('p', { class: 'muted' }, 'Name it “Values”.')),
+        step(6, 'Add “Get Details of Health Sample”', h('p', { class: 'muted' }, 'Detail: Start Date. Tap its input and choose “Health Samples” from step 2.')),
+        step(7, 'Add “Format Date”', h('p', { class: 'muted' }, 'Date Format: ISO 8601. Turn on “Include ISO 8601 Time”.')),
+        step(8, 'Add “Combine Text”', h('p', { class: 'muted' }, 'Combine with: New Lines.')),
+        step(9, 'Add “Set Variable”', h('p', { class: 'muted' }, 'Name it “Dates”.')),
+        step(10, 'Add “Text” with exactly these 4 lines', h('pre', { class: 'code' }, 'LIFT-HR\n[Values]\n---\n[Dates]'),
+          h('p', { class: 'muted' }, 'Insert the Values and Dates variables where shown.')),
+        step(11, 'Add “Copy to Clipboard”'),
+        step(12, 'Add “Show Notification”', h('p', { class: 'muted' }, 'Text: “Heart rate copied — go back to Lift and tap Paste.”')),
+        step(13, 'Run it once', h('p', { class: 'muted' }, 'Tap ▶ in Shortcuts and allow access to Heart Rate. The shortcut can only read heart rate, nothing else.')))),
+    section(null, h('a', { class: 'btn secondary block', href: SHORTCUT_URL }, icon('play'), 'Test the shortcut')),
+  ];
+}

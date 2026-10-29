@@ -127,7 +127,10 @@ export function lastPerformance(workouts, exId) {
 
 // Progressive overload: if every planned set at the top weight hit the top of
 // the rep range, add weight. Otherwise keep the weight and beat the weakest set.
-// Returns { w, r, kind } where kind is 'new' | 'up' | 'same' | 'bw-up'.
+// Effort ratings (RPE, 10 = nothing left) adjust this when every top set has one:
+// all reps hit but every set at 10 → repeat the weight; reps missed but nothing
+// harder than 7 → add weight anyway.
+// Returns { w, r, kind } where kind is 'new' | 'up' | 'easy' | 'hold' | 'same' | 'bw-up'.
 export function suggestNext(prevSets, plan, incrementKg) {
   const done = (prevSets || []).filter(s => s.done && s.r > 0);
   if (!done.length) return { w: null, r: plan.repMin, kind: 'new' };
@@ -143,7 +146,13 @@ export function suggestNext(prevSets, plan, incrementKg) {
       ? { w: 0, r: maxReps + 1, kind: 'bw-up' }
       : { w: 0, r: Math.min(Math.max(minReps + 1, plan.repMin), plan.repMax), kind: 'same' };
   }
-  if (allHit) return { w: topW + incrementKg, r: plan.repMin, kind: 'up' };
+  const rpes = top.map(s => s.rpe).filter(v => v != null);
+  const allRated = rpes.length === top.length;
+  if (allHit) {
+    if (allRated && Math.min(...rpes) >= 10) return { w: topW, r: plan.repMax, kind: 'hold' };
+    return { w: topW + incrementKg, r: plan.repMin, kind: 'up' };
+  }
+  if (allRated && Math.max(...rpes) <= 7) return { w: topW + incrementKg, r: plan.repMin, kind: 'easy' };
   return { w: topW, r: Math.min(Math.max(minReps + 1, plan.repMin), plan.repMax), kind: 'same' };
 }
 
@@ -224,4 +233,106 @@ export function weekStats(workouts, now) {
     volume: inWeek.reduce((t, w) => t + workoutVolume(w), 0),
     streak,
   };
+}
+
+// Average effort rating of a workout's completed sets, or null if none were rated.
+export function avgEffort(workout) {
+  const rpes = workout.exercises.flatMap(e => e.sets.filter(s => s.done && s.rpe != null).map(s => s.rpe));
+  return rpes.length ? rpes.reduce((a, b) => a + b, 0) / rpes.length : null;
+}
+
+/* ---------- heart rate ---------- */
+
+export const HR_ZONES = [
+  { name: 'Very light', from: 0 },
+  { name: 'Light', from: 0.6 },
+  { name: 'Moderate', from: 0.7 },
+  { name: 'Hard', from: 0.8 },
+  { name: 'Maximum', from: 0.9 },
+];
+
+const SEC = 1000;
+const avg = vs => vs.reduce((a, b) => a + b, 0) / vs.length;
+
+// Stored heart-rate values whose bucket starts in [a, b].
+function hrBetween(hr, a, b) {
+  const ms = hr.step * SEC;
+  const i0 = Math.max(0, Math.floor((a - hr.t0) / ms));
+  const i1 = Math.min(hr.bpm.length - 1, Math.floor((b - hr.t0) / ms));
+  const out = [];
+  for (let i = i0; i <= i1; i++) if (hr.bpm[i] != null) out.push(hr.bpm[i]);
+  return out;
+}
+
+function hrAt(hr, t) {
+  const i = Math.floor((t - hr.t0) / (hr.step * SEC));
+  return hr.bpm[i] ?? null;
+}
+
+// Everything the workout screen shows about heart rate. Returns null without data.
+//   avg, max, zones (seconds per HR_ZONES entry),
+//   exercises: [{ index, avg, peak, recovery }] for exercises with timed sets,
+//   recoveries: [{ t, index, drop }] bpm drop in the first minute of each rest,
+//   fatigue: { first, last, changePct } when there are enough recoveries to compare.
+export function heartSummary(workout, maxHR) {
+  const hr = workout.hr;
+  if (!hr) return null;
+  const end = workout.end || hr.t0 + hr.bpm.length * hr.step * SEC;
+  const vals = hrBetween(hr, workout.start, end);
+  if (!vals.length) return null;
+
+  const zones = HR_ZONES.map(() => 0);
+  for (const v of vals) {
+    let z = 0;
+    while (z + 1 < HR_ZONES.length && v / maxHR >= HR_ZONES[z + 1].from) z++;
+    zones[z] += hr.step;
+  }
+
+  const timed = workout.exercises
+    .flatMap((e, index) => e.sets.filter(s => s.done && s.t != null).map(s => ({ t: s.t, index })))
+    .sort((a, b) => a.t - b.t);
+
+  // Recovery: how far heart rate falls in the first 60 s after a set. Only
+  // counted when the rest really lasted that long (next set ≥ 100 s later).
+  const recoveries = [];
+  timed.forEach((s, k) => {
+    const next = timed[k + 1]?.t ?? end;
+    if (next - s.t < 100 * SEC) return;
+    const around = hrBetween(hr, s.t - 20 * SEC, s.t + 15 * SEC);
+    const after = hrAt(hr, s.t + 60 * SEC);
+    if (!around.length || after == null) return;
+    recoveries.push({ t: s.t, index: s.index, drop: Math.max(...around) - after });
+  });
+
+  const exercises = [];
+  workout.exercises.forEach((e, index) => {
+    const ts = timed.filter(s => s.index === index).map(s => s.t);
+    if (!ts.length) return;
+    const first = Math.min(...ts);
+    const before = timed.filter(s => s.index !== index && s.t < first).map(s => s.t);
+    const from = before.length ? Math.max(...before) : workout.start;
+    const window = hrBetween(hr, from, Math.max(...ts) + 15 * SEC);
+    if (!window.length) return;
+    const drops = recoveries.filter(r => r.index === index).map(r => r.drop);
+    exercises.push({
+      index,
+      avg: Math.round(avg(window)),
+      peak: Math.max(...window),
+      recovery: drops.length ? Math.round(avg(drops)) : null,
+    });
+  });
+
+  let fatigue = null;
+  if (recoveries.length >= 4) {
+    const k = Math.ceil(recoveries.length / 3);
+    const first = avg(recoveries.slice(0, k).map(r => r.drop));
+    const last = avg(recoveries.slice(-k).map(r => r.drop));
+    fatigue = {
+      first: Math.round(first),
+      last: Math.round(last),
+      changePct: first > 0 ? Math.round(((first - last) / first) * 100) : 0,
+    };
+  }
+
+  return { avg: Math.round(avg(vals)), max: Math.max(...vals), zones, exercises, recoveries, fatigue };
 }

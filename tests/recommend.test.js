@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EXERCISES_BY_ID } from '../exercises.js';
 import {
   buildRoutine, suggestNext, muscleRecovery, recommendToday, weekStats, newRecords, estimateMinutes,
+  avgEffort, heartSummary, HR_ZONES,
 } from '../recommend.js';
 
 const HOUR = 3600 * 1000;
@@ -135,4 +136,84 @@ test('newRecords detects heavier weight but not first-ever attempts', () => {
   const now = workout(NOW, [['bench-press', [set(65, 5)]], ['back-squat', [set(100, 5)]]]);
   const prs = newRecords(now, prev);
   assert.deepEqual(prs.map(p => [p.exId, p.kind]), [['bench-press', 'weight']]);
+});
+
+const rated = (w, r, rpe) => ({ w, r, done: true, rpe });
+
+test('suggestNext: all reps hit but every set at max effort repeats the weight', () => {
+  const s = suggestNext([rated(60, 12, 10), rated(60, 12, 10), rated(60, 12, 10)], plan, 2.5);
+  assert.deepEqual(s, { w: 60, r: 12, kind: 'hold' });
+});
+
+test('suggestNext: all reps hit with one set below max effort still adds weight', () => {
+  const s = suggestNext([rated(60, 12, 9), rated(60, 12, 10), rated(60, 12, 10)], plan, 2.5);
+  assert.equal(s.kind, 'up');
+});
+
+test('suggestNext: missed reps but easy effort adds weight anyway', () => {
+  const s = suggestNext([rated(60, 10, 7), rated(60, 10, 6), rated(60, 10, 7)], plan, 2.5);
+  assert.deepEqual(s, { w: 62.5, r: 8, kind: 'easy' });
+});
+
+test('suggestNext: effort only counts when every top set is rated', () => {
+  const s = suggestNext([rated(60, 10, 6), set(60, 10), set(60, 10)], plan, 2.5);
+  assert.equal(s.kind, 'same');
+});
+
+test('avgEffort averages rated, completed sets only', () => {
+  const w = workout(NOW, [['bench-press', [rated(60, 8, 8), rated(60, 8, 9), set(60, 8), { w: 60, r: 8, done: false, rpe: 6 }]]]);
+  assert.equal(avgEffort(w), 8.5);
+  assert.equal(avgEffort(workout(NOW, [['bench-press', [set(60, 8)]]])), null);
+});
+
+// Synthetic workout: 4 sets, 3 minutes apart. Heart rate peaks at 150 around
+// each set and falls by 40, 35, 25, 20 bpm one minute later (getting tired).
+function hrWorkout() {
+  const MIN = 60000, T = NOW;
+  const setTimes = [2, 5, 8, 11].map(m => T + m * MIN);
+  const drops = [40, 35, 25, 20];
+  const t0 = T - MIN, step = 15;
+  const bpm = Array.from({ length: Math.ceil((15 * MIN) / (step * 1000)) }, () => 100);
+  const idx = t => Math.floor((t - t0) / (step * 1000));
+  setTimes.forEach((ts, k) => {
+    for (let i = idx(ts - 30000); i <= idx(ts + 10000); i++) bpm[i] = 150;
+    bpm[idx(ts + 60000)] = 150 - drops[k];
+  });
+  return {
+    id: 'hr', routineId: null, name: 'HR', start: T, end: T + 14 * MIN,
+    hr: { t0, step, bpm },
+    exercises: [
+      { exId: 'bench-press', repMin: 8, repMax: 12, rest: 150, sets: [{ w: 60, r: 10, done: true, t: setTimes[0] }, { w: 60, r: 10, done: true, t: setTimes[1] }] },
+      { exId: 'barbell-row', repMin: 8, repMax: 12, rest: 150, sets: [{ w: 60, r: 10, done: true, t: setTimes[2] }, { w: 60, r: 10, done: true, t: setTimes[3] }] },
+    ],
+  };
+}
+
+test('heartSummary: average, max and zones', () => {
+  const h = heartSummary(hrWorkout(), 190);
+  assert.equal(h.max, 150);
+  assert.ok(h.avg > 100 && h.avg < 150);
+  assert.equal(h.zones.length, HR_ZONES.length);
+  assert.equal(h.zones.reduce((a, b) => a + b, 0), 15 * 56, 'every bucket inside the workout is counted');
+  assert.equal(h.zones[3] + h.zones[4], 0, 'nothing reached 80% of max');
+  assert.ok(h.zones[2] > 0, '150 bpm is moderate (79% of 190)');
+});
+
+test('heartSummary: recovery per set, per exercise, and fatigue trend', () => {
+  const h = heartSummary(hrWorkout(), 190);
+  assert.deepEqual(h.recoveries.map(r => r.drop), [40, 35, 25, 20]);
+  assert.deepEqual(h.exercises.map(e => [e.index, e.peak, e.recovery]), [[0, 150, 38], [1, 150, 23]]);
+  assert.deepEqual(h.fatigue, { first: 38, last: 23, changePct: 40 });
+});
+
+test('heartSummary: short rests are not counted as recovery', () => {
+  const w = hrWorkout();
+  w.exercises[0].sets[1].t = w.exercises[0].sets[0].t + 80000; // next set only 80 s later
+  const h = heartSummary(w, 190);
+  assert.equal(h.recoveries.length, 3);
+  assert.equal(h.fatigue, null, 'needs at least 4 recoveries');
+});
+
+test('heartSummary: returns null without heart rate', () => {
+  assert.equal(heartSummary(workout(NOW, [['bench-press', [set(60, 8)]]]), 190), null);
 });

@@ -16,6 +16,8 @@ next and how much weight to use.
 - **Routine builder:** pick muscles, a goal (strength / muscle / endurance) and your available time, and Lift builds an editable routine.
 - **Workout logging:** previous numbers, progressive-overload targets (+2.5 kg when you hit the top of your rep range on every set) and a rest timer.
 - **History:** past workouts, personal records and a progress chart for each exercise.
+- **Effort ratings:** after each set, optionally rate how hard it was (6–10). Weight suggestions use it: hit every rep at max effort → repeat the weight; missed reps but it felt easy → add weight.
+- **Apple Watch heart rate:** after a workout, import heart rate from Apple Health to see a heart-rate chart, zones, per-exercise effort and how much your recovery between sets slowed (a fatigue signal). The one-time Shortcuts setup is explained in the app under **Settings → Apple Health shortcut**.
 - **Backup:** export and restore your data as a file.
 
 ## Privacy & security
@@ -24,6 +26,7 @@ next and how much weight to use.
 - A strict Content-Security-Policy allows only the app's own files to load.
 - User input is always rendered as text, never as HTML.
 - Imported backups are size-limited and rebuilt field by field from a strict schema.
+- Heart rate comes from a shortcut you run yourself, via the clipboard. Lift only accepts data in that shortcut's format, keeps only the readings from the workout's time window, and clears the clipboard afterwards.
 - The repository contains only code, never any workout data.
 
 ## Development

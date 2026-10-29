@@ -1,6 +1,6 @@
 // Offline support: serve this app's own files from cache, refresh them in the
 // background. Only same-origin GET requests are handled; nothing else is touched.
-const CACHE = 'lift-v1';
+const CACHE = 'lift-v2';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './store.js', './recommend.js',
   './exercises.js', './manifest.webmanifest',

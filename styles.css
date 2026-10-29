@@ -650,3 +650,91 @@ button.row:active { background: var(--surface); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------- effort & heart rate ---------- */
+
+:root { --heart: #ff4d6d; --z1: #8e9aaf; --z2: #4cc9f0; --z3: #c6ff34; --z4: #ffb340; --z5: #ff4d6d; }
+
+.stats:has(> :nth-child(4)) { grid-template-columns: 1fr 1fr; }
+.i-heart { color: var(--heart); }
+.stat .i-heart { color: var(--heart); }
+
+button.set-num { display: flex; flex-direction: column; align-items: center; line-height: 1.1; color: var(--accent); font-weight: 700; }
+button.set-num small { font-size: 10px; color: var(--accent); font-weight: 600; }
+
+.effort-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 6px;
+  padding: 8px 8px 8px 12px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  animation: fade-in 0.18s ease-out;
+}
+.effort-label { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.15; white-space: nowrap; }
+.effort-label small { display: block; font-size: 11px; font-weight: 500; }
+.effort-row button:not(.effort-close) {
+  width: 34px; height: 36px; flex: none;
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.effort-row button.on { background: var(--accent); color: var(--accent-ink); }
+.effort-close { width: 28px; height: 36px; display: grid; place-items: center; color: var(--muted); }
+.effort-close .icon { width: 16px; height: 16px; }
+
+.hr-empty p { margin-bottom: 14px; font-size: 15px; }
+.hr-empty .btn.text { margin-top: 6px; }
+.hr-actions { display: flex; gap: 10px; margin-top: 12px; }
+.hr-actions .btn { flex: 1; text-decoration: none; color: inherit; padding: 0 10px; }
+.hr-actions .btn.primary { color: var(--accent-ink); }
+.hr-actions .btn .icon { width: 18px; height: 18px; }
+.hr-note { margin: 10px 4px 0; }
+
+.chart-card.heart { color: var(--heart); margin-top: 12px; }
+.chart-card.heart .chart-labels strong { font-size: 17px; }
+.chart-axis { display: flex; justify-content: space-between; margin-top: 4px; }
+.band { fill: rgba(255, 255, 255, 0.025); }
+.band.odd { fill: rgba(255, 255, 255, 0.06); }
+.band-label { fill: var(--muted); font: 600 11px var(--font); }
+
+.insight { margin-top: 12px; border-color: rgba(198, 255, 52, 0.25); }
+.insight.warn { border-color: rgba(255, 179, 64, 0.35); }
+.insight strong { display: block; margin-bottom: 4px; font-size: 17px; }
+.insight.warn strong { color: var(--amber); }
+.insight p { font-size: 14px; }
+
+.zones { margin-top: 12px; }
+.zone-bar { display: flex; height: 10px; border-radius: 6px; overflow: hidden; background: var(--surface-2); margin-bottom: 10px; }
+.zone-bar span { display: block; height: 100%; }
+.zone-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.zone-row strong { font-size: 15px; margin-right: 6px; }
+.zone-dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.z1 { background: var(--z1); } .z2 { background: var(--z2); } .z3 { background: var(--z3); }
+.z4 { background: var(--z4); } .z5 { background: var(--z5); }
+
+.hr-exercises { margin-top: 12px; }
+.hr-exercises small { text-transform: none; }
+.recovery-drop { text-align: right; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.recovery-drop small { display: block; font-size: 11px; font-weight: 500; }
+
+.num.small.wide { width: 64px; }
+label.row { cursor: pointer; }
+
+.steps { list-style: none; margin: 0; padding: 6px 16px; }
+.step { display: flex; gap: 12px; padding: 12px 0; }
+.step + .step { border-top: 1px solid var(--border); }
+.step strong { display: block; margin: 2px 0 2px; }
+.step p { font-size: 14px; }
+.code {
+  margin: 8px 0 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  font: 14px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+}
+a.btn { text-decoration: none; color: inherit; }
+.detail-head p.intro { text-transform: none; }

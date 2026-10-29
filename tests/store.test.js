@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeState, parseBackup, load, save, emptyState, MAX_IMPORT_BYTES } from '../store.js';
+import { sanitizeState, parseBackup, load, save, emptyState, MAX_IMPORT_BYTES, parseHeartRate, compactHeartRate, MAX_HR_TEXT } from '../store.js';
 
 const memoryStorage = () => {
   const m = new Map();
@@ -79,4 +79,68 @@ test('sanitizeState strips unknown fields, bad exercises and bad values', () => 
 test('sanitizeState caps list sizes', () => {
   const routines = Array.from({ length: 1000 }, (_, i) => ({ id: 'r' + i, name: 'R', exercises: [] }));
   assert.equal(sanitizeState({ routines }).routines.length, 200);
+});
+
+test('sanitizeState keeps valid set times, effort and heart rate; drops bad ones', () => {
+  const s = sanitizeState({
+    settings: { unit: 'kg', maxHR: 999 },
+    routines: [],
+    workouts: [{ id: 'w', start: 1000, end: 2000, exercises: [{ exId: 'deadlift', sets: [
+      { w: 100, r: 5, done: true, t: 1500, rpe: 8.3 },
+      { w: 100, r: 5, done: true, t: 'soon', rpe: '<b>' },
+    ] }], hr: { t0: 900, step: 15, bpm: [120, 'x', 300, 24.9, 141.6], extra: 1 } }],
+  });
+  assert.equal(s.settings.maxHR, 230);
+  const [a, b] = s.workouts[0].exercises[0].sets;
+  assert.deepEqual(a, { w: 100, r: 5, done: true, t: 1500, rpe: 8.5 });
+  assert.deepEqual(b, { w: 100, r: 5, done: true });
+  assert.deepEqual(s.workouts[0].hr, { t0: 900, step: 15, bpm: [120, null, null, null, 142] });
+  assert.equal(sanitizeState({ workouts: [{ start: 1, exercises: [], hr: { t0: 1, bpm: ['a'] } }] }).workouts[0].hr, undefined);
+});
+
+const hrText = lines => ['LIFT-HR', ...lines].join('\n');
+
+test('parseHeartRate reads the shortcut format', () => {
+  const samples = parseHeartRate(hrText([
+    '72', '130 count/min', '141,5', '---',
+    '2026-10-29T18:00:00+01:00', '2026-10-29T18:00:05+0100', '2026-10-29T17:00:10Z',
+  ]));
+  assert.deepEqual(samples, [
+    { t: Date.parse('2026-10-29T17:00:00Z'), bpm: 72 },
+    { t: Date.parse('2026-10-29T17:00:05Z'), bpm: 130 },
+    { t: Date.parse('2026-10-29T17:00:10Z'), bpm: 141.5 },
+  ]);
+});
+
+test('parseHeartRate drops implausible values', () => {
+  const s = parseHeartRate(hrText(['10', '90', '400', '---', '2026-10-29T18:00:00Z', '2026-10-29T18:00:05Z', '2026-10-29T18:00:10Z']));
+  assert.deepEqual(s.map(x => x.bpm), [90]);
+});
+
+test('parseHeartRate rejects other clipboard content and malformed data', () => {
+  assert.throws(() => parseHeartRate(''), /doesn’t contain heart rate/);
+  assert.throws(() => parseHeartRate('my bank password is hunter2'), /doesn’t contain heart rate/);
+  assert.throws(() => parseHeartRate(hrText(['72', '<script>alert(1)</script>'])), /couldn’t be read/);
+  assert.throws(() => parseHeartRate(hrText(['72', '80', '---', '2026-10-29T18:00:00Z'])), /incomplete/);
+  assert.throws(() => parseHeartRate(hrText(['---'])), /No heart rate/);
+  assert.throws(() => parseHeartRate('LIFT-HR\n' + '1'.repeat(MAX_HR_TEXT)), /too much data/);
+  assert.throws(() => parseHeartRate(hrText(['72', '---', '29.10.2026 18:00'])), /ISO 8601/);
+});
+
+test('compactHeartRate averages into 15 s buckets around the workout only', () => {
+  const start = 1_000_000_000, end = start + 120000;
+  const samples = [
+    { t: start - 3600000, bpm: 60 },          // an hour before: ignored
+    { t: start, bpm: 100 }, { t: start + 5000, bpm: 110 },
+    { t: start + 60000, bpm: 150 },
+    { t: end + 3600000, bpm: 60 },            // an hour after: ignored
+  ];
+  const hr = compactHeartRate(samples, start, end);
+  assert.equal(hr.t0, start - 60000);
+  assert.equal(hr.step, 15);
+  assert.equal(hr.bpm.length, 16);
+  assert.equal(hr.bpm[4], 105);
+  assert.equal(hr.bpm[8], 150);
+  assert.equal(hr.bpm.filter(v => v != null).length, 2);
+  assert.equal(compactHeartRate(samples.slice(0, 1), start, end), null, 'too little data');
 });
